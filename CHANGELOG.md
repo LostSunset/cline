@@ -1,5 +1,21 @@
 # Change Log
 
+## [2.0.19]
+
+- Fix model info for Claude 3.5 Sonnet v1 on OpenRouter
+
+## [2.0.18]
+
+- Add support for both v1 and v2 of Claude 3.5 Sonnet for GCP Vertex and AWS Bedrock (for cases where the new model is not enabled yet or unavailable in your region)
+
+## [2.0.17]
+
+- Update Anthropic model IDs
+
+## [2.0.16]
+
+- Adjustments to system prompt
+
 ## [2.0.15]
 
 - Fix bug where modifying Cline's edits would lead him to try to re-apply the edits
