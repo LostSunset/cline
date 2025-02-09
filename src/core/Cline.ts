@@ -9,6 +9,9 @@ import * as path from "path"
 import { serializeError } from "serialize-error"
 import * as vscode from "vscode"
 import { ApiHandler, buildApiHandler } from "../api"
+import { OpenAiHandler } from "../api/providers/openai"
+import { OpenRouterHandler } from "../api/providers/openrouter"
+import { ApiStream } from "../api/transform/stream"
 import CheckpointTracker from "../integrations/checkpoints/CheckpointTracker"
 import { DIFF_VIEW_URI_SCHEME, DiffViewProvider } from "../integrations/editor/DiffViewProvider"
 import { findToolName, formatContentBlockToMarkdown } from "../integrations/misc/export-markdown"
@@ -50,15 +53,12 @@ import { arePathsEqual, getReadablePath } from "../utils/path"
 import { fixModelHtmlEscaping, removeInvalidChars } from "../utils/string"
 import { AssistantMessageContent, parseAssistantMessage, ToolParamName, ToolUseName } from "./assistant-message"
 import { constructNewFileContent } from "./assistant-message/diff"
+import { ClineIgnoreController, LOCK_TEXT_SYMBOL } from "./ignore/ClineIgnoreController"
 import { parseMentions } from "./mentions"
 import { formatResponse } from "./prompts/responses"
-import { ClineProvider, GlobalFileNames } from "./webview/ClineProvider"
-import { OpenRouterHandler } from "../api/providers/openrouter"
+import { addUserInstructions, SYSTEM_PROMPT } from "./prompts/system"
 import { getNextTruncationRange, getTruncatedMessages } from "./sliding-window"
-import { SYSTEM_PROMPT } from "./prompts/system"
-import { addUserInstructions } from "./prompts/system"
-import { OpenAiHandler } from "../api/providers/openai"
-import { ApiStream } from "../api/transform/stream"
+import { ClineProvider, GlobalFileNames } from "./webview/ClineProvider"
 
 const cwd = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath).at(0) ?? path.join(os.homedir(), "Desktop") // may or may not exist but fs checking existence would immediately ask for permission which would be bad UX, need to come up with a better solution
 
@@ -80,6 +80,7 @@ export class Cline {
 	private chatSettings: ChatSettings
 	apiConversationHistory: Anthropic.MessageParam[] = []
 	clineMessages: ClineMessage[] = []
+	private clineIgnoreController: ClineIgnoreController
 	private askResponse?: ClineAskResponse
 	private askResponseText?: string
 	private askResponseImages?: string[]
@@ -123,6 +124,10 @@ export class Cline {
 		images?: string[],
 		historyItem?: HistoryItem,
 	) {
+		this.clineIgnoreController = new ClineIgnoreController(cwd)
+		this.clineIgnoreController.initialize().catch((error) => {
+			console.error("Failed to initialize ClineIgnoreController:", error)
+		})
 		this.providerRef = new WeakRef(provider)
 		this.api = buildApiHandler(apiConfiguration)
 		this.terminalManager = new TerminalManager()
@@ -214,7 +219,7 @@ export class Cline {
 	private async addToClineMessages(message: ClineMessage) {
 		// these values allow us to reconstruct the conversation history at the time this cline message was created
 		// it's important that apiConversationHistory is initialized before we add cline messages
-		message.conversationHistoryIndex = this.apiConversationHistory.length - 1 // NOTE: this is the index of the last added message which is the user message, and once the clinemessages have been presented we update the apiconversationhistory with the completed assistant message. This means when reseting to a message, we need to +1 this index to get the correct assistant message that this tool use corresponds to
+		message.conversationHistoryIndex = this.apiConversationHistory.length - 1 // NOTE: this is the index of the last added message which is the user message, and once the clinemessages have been presented we update the apiconversationhistory with the completed assistant message. This means when resetting to a message, we need to +1 this index to get the correct assistant message that this tool use corresponds to
 		message.conversationHistoryDeletedRange = this.conversationHistoryDeletedRange
 		this.clineMessages.push(message)
 		await this.saveClineMessages()
@@ -748,6 +753,7 @@ export class Cline {
 		// if the extension process were killed, then on restart the clineMessages might not be empty, so we need to set it to [] when we create a new Cline client (otherwise webview would show stale messages from previous session)
 		this.clineMessages = []
 		this.apiConversationHistory = []
+
 		await this.providerRef.deref()?.postStateToWebview()
 
 		await this.say("text", task, images)
@@ -1050,6 +1056,7 @@ export class Cline {
 		this.terminalManager.disposeAll()
 		this.urlContentFetcher.closeBrowser()
 		this.browserSession.closeBrowser()
+		this.clineIgnoreController.dispose()
 		await this.diffViewProvider.revertChanges() // need to await for when we want to make sure directories/files are reverted before re-starting the task from a checkpoint
 	}
 
@@ -1194,6 +1201,14 @@ export class Cline {
 		return false
 	}
 
+	private formatErrorWithStatusCode(error: any): string {
+		const statusCode = error.status || error.statusCode || (error.response && error.response.status)
+		const message = error.message ?? JSON.stringify(serializeError(error), null, 2)
+
+		// Only prepend the statusCode if it's not already part of the message
+		return statusCode && !message.includes(statusCode.toString()) ? `${statusCode} - ${message}` : message
+	}
+
 	async *attemptApiRequest(previousApiReqIndex: number): ApiStream {
 		// Wait for MCP servers to be connected before generating system prompt
 		await pWaitFor(() => this.providerRef.deref()?.mcpHub?.isConnecting !== true, { timeout: 10_000 }).catch(() => {
@@ -1226,9 +1241,15 @@ export class Cline {
 			}
 		}
 
+		const clineIgnoreContent = this.clineIgnoreController.clineIgnoreContent
+		let clineIgnoreInstructions: string | undefined
+		if (clineIgnoreContent) {
+			clineIgnoreInstructions = `# .clineignore\n\n(The following is provided by a root-level .clineignore file where the user has specified files and directories that should not be accessed. When using list_files, you'll notice a ${LOCK_TEXT_SYMBOL} next to files that are blocked. Attempting to access the file's contents e.g. through read_file will result in an error.)\n\n${clineIgnoreContent}\n.clineignore`
+		}
+
 		if (settingsCustomInstructions || clineRulesFileInstructions) {
 			// altering the system prompt mid-task will break the prompt cache, but in the grand scheme this will not change often so it's better to not pollute user messages with it the way we have to with <potentially relevant details>
-			systemPrompt += addUserInstructions(settingsCustomInstructions, clineRulesFileInstructions)
+			systemPrompt += addUserInstructions(settingsCustomInstructions, clineRulesFileInstructions, clineIgnoreInstructions)
 		}
 
 		// If the previous API request's total token usage is close to the context window, truncate the conversation history to free up space for the new request
@@ -1301,10 +1322,9 @@ export class Cline {
 			} else {
 				// request failed after retrying automatically once, ask user if they want to retry again
 				// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
-				const { response } = await this.ask(
-					"api_req_failed",
-					error.message ?? JSON.stringify(serializeError(error), null, 2),
-				)
+				const errorMessage = this.formatErrorWithStatusCode(error)
+
+				const { response } = await this.ask("api_req_failed", errorMessage)
 				if (response !== "yesButtonClicked") {
 					// this will never happen since if noButtonClicked, we will clear current task, aborting this instance
 					throw new Error("API request failed")
@@ -1392,7 +1412,7 @@ export class Cline {
 
 				if (!block.partial) {
 					// Some models add code block artifacts (around the tool calls) which show up at the end of text content
-					// matches ``` with atleast one char after the last backtick, at the end of the string
+					// matches ``` with at least one char after the last backtick, at the end of the string
 					const match = content?.trimEnd().match(/```[a-zA-Z0-9_-]+$/)
 					if (match) {
 						const matchLength = match[0].length
@@ -1576,6 +1596,15 @@ export class Cline {
 							// wait so we can determine if it's a new file or editing an existing file
 							break
 						}
+
+						const accessAllowed = this.clineIgnoreController.validateAccess(relPath)
+						if (!accessAllowed) {
+							await this.say("clineignore_error", relPath)
+							pushToolResult(formatResponse.toolError(formatResponse.clineIgnoreError(relPath)))
+							await this.saveCheckpoint()
+							break
+						}
+
 						// Check if file exists using cached map or fs.access
 						let fileExists: boolean
 						if (this.diffViewProvider.editType !== undefined) {
@@ -1693,6 +1722,7 @@ export class Cline {
 									await this.saveCheckpoint()
 									break
 								}
+
 								this.consecutiveMistakeCount = 0
 
 								// if isEditingFile false, that means we have the full contents of the file already.
@@ -1805,6 +1835,11 @@ export class Cline {
 											`${newProblemsMessage}`,
 									)
 								}
+
+								if (!fileExists) {
+									this.providerRef.deref()?.workspaceTracker?.populateFilePaths()
+								}
+
 								await this.diffViewProvider.reset()
 								await this.saveCheckpoint()
 								break
@@ -1844,6 +1879,15 @@ export class Cline {
 									await this.saveCheckpoint()
 									break
 								}
+
+								const accessAllowed = this.clineIgnoreController.validateAccess(relPath)
+								if (!accessAllowed) {
+									await this.say("clineignore_error", relPath)
+									pushToolResult(formatResponse.toolError(formatResponse.clineIgnoreError(relPath)))
+									await this.saveCheckpoint()
+									break
+								}
+
 								this.consecutiveMistakeCount = 0
 								const absolutePath = path.resolve(cwd, relPath)
 								const completeMessage = JSON.stringify({
@@ -1907,9 +1951,17 @@ export class Cline {
 									break
 								}
 								this.consecutiveMistakeCount = 0
+
 								const absolutePath = path.resolve(cwd, relDirPath)
+
 								const [files, didHitLimit] = await listFiles(absolutePath, recursive, 200)
-								const result = formatResponse.formatFilesList(absolutePath, files, didHitLimit)
+
+								const result = formatResponse.formatFilesList(
+									absolutePath,
+									files,
+									didHitLimit,
+									this.clineIgnoreController,
+								)
 								const completeMessage = JSON.stringify({
 									...sharedMessageProps,
 									content: result,
@@ -1966,9 +2018,15 @@ export class Cline {
 									await this.saveCheckpoint()
 									break
 								}
+
 								this.consecutiveMistakeCount = 0
+
 								const absolutePath = path.resolve(cwd, relDirPath)
-								const result = await parseSourceCodeForDefinitionsTopLevel(absolutePath)
+								const result = await parseSourceCodeForDefinitionsTopLevel(
+									absolutePath,
+									this.clineIgnoreController,
+								)
+
 								const completeMessage = JSON.stringify({
 									...sharedMessageProps,
 									content: result,
@@ -2036,8 +2094,16 @@ export class Cline {
 									break
 								}
 								this.consecutiveMistakeCount = 0
+
 								const absolutePath = path.resolve(cwd, relDirPath)
-								const results = await regexSearchFiles(cwd, absolutePath, regex, filePattern)
+								const results = await regexSearchFiles(
+									cwd,
+									absolutePath,
+									regex,
+									filePattern,
+									this.clineIgnoreController,
+								)
+
 								const completeMessage = JSON.stringify({
 									...sharedMessageProps,
 									content: results,
@@ -2274,6 +2340,16 @@ export class Cline {
 								}
 								this.consecutiveMistakeCount = 0
 
+								const ignoredFileAttemptedToAccess = this.clineIgnoreController.validateCommand(command)
+								if (ignoredFileAttemptedToAccess) {
+									await this.say("clineignore_error", ignoredFileAttemptedToAccess)
+									pushToolResult(
+										formatResponse.toolError(formatResponse.clineIgnoreError(ignoredFileAttemptedToAccess)),
+									)
+									await this.saveCheckpoint()
+									break
+								}
+
 								let didAutoApprove = false
 
 								if (!requiresApproval && this.shouldAutoApproveTool(block.name)) {
@@ -2316,6 +2392,10 @@ export class Cline {
 								if (userRejected) {
 									this.didRejectTool = true
 								}
+
+								// Re-populate file paths in case the command modified the workspace (vscode listeners do not trigger unless the user manually creates/deletes files)
+								this.providerRef.deref()?.workspaceTracker?.populateFilePaths()
+
 								pushToolResult(result)
 								await this.saveCheckpoint()
 								break
@@ -2786,7 +2866,7 @@ export class Cline {
 		if (!block.partial || this.didRejectTool || this.didAlreadyUseTool) {
 			// block is finished streaming and executing
 			if (this.currentStreamingContentIndex === this.assistantMessageContent.length - 1) {
-				// its okay that we increment if !didCompleteReadingStream, it'll just return bc out of bounds and as streaming continues it will call presentAssitantMessage if a new block is ready. if streaming is finished then we set userMessageContentReady to true when out of bounds. This gracefully allows the stream to continue on and all potential content blocks be presented.
+				// its okay that we increment if !didCompleteReadingStream, it'll just return bc out of bounds and as streaming continues it will call presentAssistantMessage if a new block is ready. if streaming is finished then we set userMessageContentReady to true when out of bounds. This gracefully allows the stream to continue on and all potential content blocks be presented.
 				// last block is complete and it is finished executing
 				this.userMessageContentReady = true // will allow pwaitfor to continue
 			}
@@ -3052,7 +3132,9 @@ export class Cline {
 				// abandoned happens when extension is no longer waiting for the cline instance to finish aborting (error is thrown here when any function in the for loop throws due to this.abort)
 				if (!this.abandoned) {
 					this.abortTask() // if the stream failed, there's various states the task could be in (i.e. could have streamed some tools the user may have executed), so we just resort to replicating a cancel task
-					await abortStream("streaming_failed", error.message ?? JSON.stringify(serializeError(error), null, 2))
+					const errorMessage = this.formatErrorWithStatusCode(error)
+
+					await abortStream("streaming_failed", errorMessage)
 					const history = await this.providerRef.deref()?.getTaskWithId(this.taskId)
 					if (history) {
 						await this.providerRef.deref()?.initClineWithHistoryItem(history.historyItem)
@@ -3175,26 +3257,38 @@ export class Cline {
 
 		// It could be useful for cline to know if the user went from one or no file to another between messages, so we always include this context
 		details += "\n\n# VSCode Visible Files"
-		const visibleFiles = vscode.window.visibleTextEditors
+		const visibleFilePaths = vscode.window.visibleTextEditors
 			?.map((editor) => editor.document?.uri?.fsPath)
 			.filter(Boolean)
-			.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
+			.map((absolutePath) => path.relative(cwd, absolutePath))
+
+		// Filter paths through clineIgnoreController
+		const allowedVisibleFiles = this.clineIgnoreController
+			.filterPaths(visibleFilePaths)
+			.map((p) => p.toPosix())
 			.join("\n")
-		if (visibleFiles) {
-			details += `\n${visibleFiles}`
+
+		if (allowedVisibleFiles) {
+			details += `\n${allowedVisibleFiles}`
 		} else {
 			details += "\n(No visible files)"
 		}
 
 		details += "\n\n# VSCode Open Tabs"
-		const openTabs = vscode.window.tabGroups.all
+		const openTabPaths = vscode.window.tabGroups.all
 			.flatMap((group) => group.tabs)
 			.map((tab) => (tab.input as vscode.TabInputText)?.uri?.fsPath)
 			.filter(Boolean)
-			.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
+			.map((absolutePath) => path.relative(cwd, absolutePath))
+
+		// Filter paths through clineIgnoreController
+		const allowedOpenTabs = this.clineIgnoreController
+			.filterPaths(openTabPaths)
+			.map((p) => p.toPosix())
 			.join("\n")
-		if (openTabs) {
-			details += `\n${openTabs}`
+
+		if (allowedOpenTabs) {
+			details += `\n${allowedOpenTabs}`
 		} else {
 			details += "\n(No open tabs)"
 		}
@@ -3308,7 +3402,7 @@ export class Cline {
 				details += "(Desktop files not shown automatically. Use list_files to explore if needed.)"
 			} else {
 				const [files, didHitLimit] = await listFiles(cwd, true, 200)
-				const result = formatResponse.formatFilesList(cwd, files, didHitLimit)
+				const result = formatResponse.formatFilesList(cwd, files, didHitLimit, this.clineIgnoreController)
 				details += result
 			}
 		}
