@@ -33,6 +33,7 @@ export interface ExtensionMessage {
 		| "commitSearchResults"
 		| "openGraphData"
 		| "isImageUrlResult"
+		| "didUpdateSettings"
 	text?: string
 	action?:
 		| "chatButtonClicked"
@@ -196,6 +197,18 @@ export interface ClineAskUseMcpServer {
 	toolName?: string
 	arguments?: string
 	uri?: string
+}
+
+export interface ClinePlanModeResponse {
+	response: string
+	options?: string[]
+	selected?: string
+}
+
+export interface ClineAskQuestion {
+	question: string
+	options?: string[]
+	selected?: string
 }
 
 export interface ClineApiReqInfo {
