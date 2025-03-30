@@ -1,6 +1,6 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
-import delay from "delay"
+import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import * as vscode from "vscode"
 import { ClineProvider } from "./core/webview/ClineProvider"
 import { Logger } from "./services/logging/Logger"
@@ -32,6 +32,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const sidebarProvider = new ClineProvider(context, outputChannel)
 
+	vscode.commands.executeCommand("setContext", "cline.isDevMode", IS_DEV && IS_DEV === "true")
+
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ClineProvider.sideBarId, sidebarProvider, {
 			webviewOptions: { retainContextWhenHidden: true },
@@ -41,9 +43,15 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cline.plusButtonClicked", async () => {
 			Logger.log("Plus button Clicked")
-			await sidebarProvider.clearTask()
-			await sidebarProvider.postStateToWebview()
-			await sidebarProvider.postMessageToWebview({
+			const visibleProvider = ClineProvider.getVisibleInstance()
+			if (!visibleProvider) {
+				Logger.log("Cannot find any visible Cline instances.")
+				return
+			}
+
+			await visibleProvider.clearTask()
+			await visibleProvider.postStateToWebview()
+			await visibleProvider.postMessageToWebview({
 				type: "action",
 				action: "chatButtonClicked",
 			})
@@ -52,7 +60,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cline.mcpButtonClicked", () => {
-			sidebarProvider.postMessageToWebview({
+			const visibleProvider = ClineProvider.getVisibleInstance()
+			if (!visibleProvider) {
+				Logger.log("Cannot find any visible Cline instances.")
+				return
+			}
+
+			visibleProvider.postMessageToWebview({
 				type: "action",
 				action: "mcpButtonClicked",
 			})
@@ -88,7 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
 		tabProvider.resolveWebviewView(panel)
 
 		// Lock the editor group so clicking on files doesn't open them over the panel
-		await delay(100)
+		await setTimeoutPromise(100)
 		await vscode.commands.executeCommand("workbench.action.lockEditorGroup")
 	}
 
@@ -98,7 +112,13 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cline.settingsButtonClicked", () => {
 			//vscode.window.showInformationMessage(message)
-			sidebarProvider.postMessageToWebview({
+			const visibleClineProvider = ClineProvider.getVisibleInstance()
+			if (!visibleClineProvider) {
+				Logger.log("Cannot find any visible Cline instances.")
+				return
+			}
+
+			visibleClineProvider.postMessageToWebview({
 				type: "action",
 				action: "settingsButtonClicked",
 			})
@@ -107,7 +127,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cline.historyButtonClicked", () => {
-			sidebarProvider.postMessageToWebview({
+			const visibleProvider = ClineProvider.getVisibleInstance()
+			if (!visibleProvider) {
+				Logger.log("Cannot find any visible Cline instances.")
+				return
+			}
+
+			visibleProvider.postMessageToWebview({
 				type: "action",
 				action: "historyButtonClicked",
 			})
@@ -116,16 +142,16 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cline.accountButtonClicked", () => {
-			sidebarProvider.postMessageToWebview({
+			const visibleProvider = ClineProvider.getVisibleInstance()
+			if (!visibleProvider) {
+				Logger.log("Cannot find any visible Cline instances.")
+				return
+			}
+
+			visibleProvider.postMessageToWebview({
 				type: "action",
 				action: "accountButtonClicked",
 			})
-		}),
-	)
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.openDocumentation", () => {
-			vscode.env.openExternal(vscode.Uri.parse("https://docs.cline.bot/"))
 		}),
 	)
 
@@ -193,8 +219,22 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 	context.subscriptions.push(vscode.window.registerUriHandler({ handleUri }))
 
+	// Register size testing commands in development mode
+	if (IS_DEV && IS_DEV === "true") {
+		// Use dynamic import to avoid loading the module in production
+		import("./dev/commands/tasks")
+			.then((module) => {
+				const devTaskCommands = module.registerTaskCommands(context, sidebarProvider)
+				context.subscriptions.push(...devTaskCommands)
+				Logger.log("Cline dev task commands registered")
+			})
+			.catch((error) => {
+				Logger.log("Failed to register dev task commands: " + error)
+			})
+	}
+
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.addToChat", async (range?: vscode.Range) => {
+		vscode.commands.registerCommand("cline.addToChat", async (range?: vscode.Range, diagnostics?: vscode.Diagnostic[]) => {
 			const editor = vscode.window.activeTextEditor
 			if (!editor) {
 				return
@@ -214,7 +254,12 @@ export function activate(context: vscode.ExtensionContext) {
 			const languageId = editor.document.languageId
 
 			// Send to sidebar provider
-			await sidebarProvider.addSelectedCodeToChat(selectedText, filePath, languageId)
+			await sidebarProvider.addSelectedCodeToChat(
+				selectedText,
+				filePath,
+				languageId,
+				Array.isArray(diagnostics) ? diagnostics : undefined,
+			)
 		}),
 	)
 
@@ -280,19 +325,26 @@ export function activate(context: vscode.ExtensionContext) {
 					range: vscode.Range,
 					context: vscode.CodeActionContext,
 				): vscode.CodeAction[] {
-					// Always offer both actions
+					// Expand range to include surrounding 3 lines
+					const expandedRange = new vscode.Range(
+						Math.max(0, range.start.line - 3),
+						0,
+						Math.min(document.lineCount - 1, range.end.line + 3),
+						document.lineAt(Math.min(document.lineCount - 1, range.end.line + 3)).text.length,
+					)
+
 					const addAction = new vscode.CodeAction("Add to Cline", vscode.CodeActionKind.QuickFix)
 					addAction.command = {
 						command: "cline.addToChat",
 						title: "Add to Cline",
-						arguments: [range],
+						arguments: [expandedRange, context.diagnostics],
 					}
 
 					const fixAction = new vscode.CodeAction("Fix with Cline", vscode.CodeActionKind.QuickFix)
 					fixAction.command = {
 						command: "cline.fixWithCline",
 						title: "Fix with Cline",
-						arguments: [range, context.diagnostics],
+						arguments: [expandedRange, context.diagnostics],
 					}
 
 					// Only show actions when there are errors
