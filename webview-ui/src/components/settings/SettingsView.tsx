@@ -2,12 +2,11 @@ import { UnsavedChangesDialog } from "@/components/common/AlertDialog"
 import HeroTooltip from "@/components/common/HeroTooltip"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { StateServiceClient } from "@/services/grpc-client"
-import { cn } from "@/utils/cn"
 import { validateApiConfiguration, validateModelId } from "@/utils/validate"
 import { vscode } from "@/utils/vscode"
 import { ExtensionMessage } from "@shared/ExtensionMessage"
 import { EmptyRequest, StringRequest } from "@shared/proto/common"
-import { PlanActMode, TogglePlanActModeRequest, UpdateSettingsRequest } from "@shared/proto/state"
+import { PlanActMode, ResetStateRequest, TogglePlanActModeRequest, UpdateSettingsRequest } from "@shared/proto/state"
 import { VSCodeButton, VSCodeCheckbox, VSCodeLink, VSCodeTextArea } from "@vscode/webview-ui-toolkit/react"
 import { CheckCheck, FlaskConical, Info, LucideIcon, Settings, SquareMousePointer, SquareTerminal, Webhook } from "lucide-react"
 import { memo, useCallback, useEffect, useRef, useState } from "react"
@@ -23,7 +22,7 @@ import SectionHeader from "./SectionHeader"
 import TerminalSettingsSection from "./TerminalSettingsSection"
 import { convertApiConfigurationToProtoApiConfiguration } from "@shared/proto-conversions/state/settings-conversion"
 import { convertChatSettingsToProtoChatSettings } from "@shared/proto-conversions/state/chat-settings-conversion"
-const { IS_DEV } = process.env
+const IS_DEV = process.env.IS_DEV
 
 // Styles for the tab system
 const settingsTabsContainer = "flex flex-1 overflow-hidden [&.narrow_.tab-label]:hidden"
@@ -406,9 +405,13 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 
 	useEvent("message", handleMessage)
 
-	const handleResetState = async () => {
+	const handleResetState = async (resetGlobalState?: boolean) => {
 		try {
-			await StateServiceClient.resetState(EmptyRequest.create({}))
+			await StateServiceClient.resetState(
+				ResetStateRequest.create({
+					global: resetGlobalState,
+				}),
+			)
 		} catch (error) {
 			console.error("Failed to reset state:", error)
 		}
@@ -500,23 +503,22 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 			</TabHeader>
 
 			{/* Vertical tabs layout */}
-			<div ref={containerRef} className={cn(settingsTabsContainer, isCompactMode && "narrow")}>
+			<div ref={containerRef} className={`${settingsTabsContainer} ${isCompactMode ? "narrow" : ""}`}>
 				{/* Tab sidebar */}
 				<TabList
 					value={activeTab}
 					onValueChange={handleTabChange}
-					className={cn(settingsTabList)}
+					className={settingsTabList}
 					data-compact={isCompactMode}>
 					{SETTINGS_TABS.map((tab) =>
 						isCompactMode ? (
 							<HeroTooltip key={tab.id} content={tab.tooltipText} placement="right">
 								<div
-									className={cn(
+									className={`${
 										activeTab === tab.id
 											? `${settingsTabTrigger} ${settingsTabTriggerActive}`
-											: settingsTabTrigger,
-										"focus:ring-0",
-									)}
+											: settingsTabTrigger
+									} focus:ring-0`}
 									data-compact={isCompactMode}
 									data-testid={`tab-${tab.id}`}
 									data-value={tab.id}
@@ -524,7 +526,7 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 										console.log("Compact tab clicked:", tab.id)
 										handleTabChange(tab.id)
 									}}>
-									<div className={cn("flex items-center gap-2", isCompactMode && "justify-center")}>
+									<div className={`flex items-center gap-2 ${isCompactMode ? "justify-center" : ""}`}>
 										<tab.icon className="w-4 h-4" />
 										<span className="tab-label">{tab.name}</span>
 									</div>
@@ -534,15 +536,14 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 							<TabTrigger
 								key={tab.id}
 								value={tab.id}
-								className={cn(
+								className={`${
 									activeTab === tab.id
 										? `${settingsTabTrigger} ${settingsTabTriggerActive}`
-										: settingsTabTrigger,
-									"focus:ring-0",
-								)}
+										: settingsTabTrigger
+								} focus:ring-0`}
 								data-compact={isCompactMode}
 								data-testid={`tab-${tab.id}`}>
-								<div className={cn("flex items-center gap-2", isCompactMode && "justify-center")}>
+								<div className={`flex items-center gap-2 ${isCompactMode ? "justify-center" : ""}`}>
 									<tab.icon className="w-4 h-4" />
 									<span className="tab-label">{tab.name}</span>
 								</div>
@@ -709,10 +710,16 @@ const SettingsView = ({ onDone, targetSection }: SettingsViewProps) => {
 									{renderSectionHeader("debug")}
 									<Section>
 										<VSCodeButton
-											onClick={handleResetState}
+											onClick={() => handleResetState()}
 											className="mt-[5px] w-auto"
 											style={{ backgroundColor: "var(--vscode-errorForeground)", color: "black" }}>
-											Reset State
+											Reset Workspace State
+										</VSCodeButton>
+										<VSCodeButton
+											onClick={() => handleResetState(true)}
+											className="mt-[5px] w-auto"
+											style={{ backgroundColor: "var(--vscode-errorForeground)", color: "black" }}>
+											Reset Global State
 										</VSCodeButton>
 										<p className="text-xs mt-[5px] text-[var(--vscode-descriptionForeground)]">
 											This will reset all global state and secret storage in the extension.

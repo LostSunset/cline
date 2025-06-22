@@ -13,8 +13,8 @@ service StateService {
   rpc getAvailableTerminalProfiles(EmptyRequest) returns (TerminalProfiles);
   rpc subscribeToState(EmptyRequest) returns (stream State);
   rpc toggleFavoriteModel(StringRequest) returns (Empty);
-  rpc resetState(EmptyRequest) returns (Empty);
-  rpc togglePlanActMode(TogglePlanActModeRequest) returns (Empty);
+  rpc resetState(ResetStateRequest) returns (Empty);
+  rpc togglePlanActMode(TogglePlanActModeRequest) returns (Boolean);
   rpc updateAutoApprovalSettings(AutoApprovalSettingsRequest) returns (Empty);
   rpc updateSettings(UpdateSettingsRequest) returns (Empty);
 }
@@ -61,6 +61,11 @@ message ChatContent {
   optional string message = 1;
   repeated string images = 2;
   repeated string files = 3;
+}
+
+message ResetStateRequest {
+  Metadata metadata = 1;
+  optional bool global = 2;
 }
 
 message AutoApprovalSettingsRequest {
@@ -212,4 +217,7 @@ message ApiConfiguration {
   optional string sap_ai_core_base_url = 74;
   optional string sap_ai_core_token_url = 75;
   optional string sap_ai_resource_group = 76;
+
+  // Claude Code specific
+  optional string claude_code_path = 77;
 }
