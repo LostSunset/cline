@@ -974,85 +974,15 @@ export const ChatRowContent = memo(
 												apiRequestFailedMessage?.toLowerCase().includes("resource exhausted")
 
 											if (isRateLimitError) {
-												// Check if current provider is Gemini CLI to show specific message
-												const isGeminiCliProvider = apiConfiguration?.apiProvider === "gemini-cli"
-
-												if (isGeminiCliProvider) {
-													return (
-														<div
-															style={{
-																backgroundColor: "rgba(255, 191, 0, 0.1)",
-																padding: "12px",
-																borderRadius: "4px",
-																border: "1px solid rgba(255, 191, 0, 0.3)",
-															}}>
-															<div
-																style={{
-																	display: "flex",
-																	alignItems: "center",
-																	marginBottom: "8px",
-																}}>
-																<i
-																	className="codicon codicon-warning"
-																	style={{
-																		marginRight: "8px",
-																		fontSize: "16px",
-																		color: "#FFA500",
-																	}}></i>
-																<span
-																	style={{
-																		fontWeight: "bold",
-																		color: "#FFA500",
-																	}}>
-																	Rate Limit Exceeded
-																</span>
-															</div>
-															<p style={{ margin: 0, fontSize: "14px", lineHeight: "1.4" }}>
-																You've hit the API rate limit. This is likely due to free tier
-																limits.
-															</p>
-															<p
-																style={{
-																	margin: "8px 0 0 0",
-																	fontSize: "12px",
-																	lineHeight: "1.4",
-																}}>
-																You can read about the tier limits{" "}
-																<a
-																	href="https://codeassist.google/"
-																	style={{
-																		color: "inherit",
-																		textDecoration: "underline",
-																	}}
-																	onClick={(e) => {
-																		e.preventDefault()
-																		UiServiceClient.openUrl(
-																			StringRequest.create({
-																				value: "https://codeassist.google/",
-																			}),
-																		).catch((err) =>
-																			console.error("Failed to open URL:", err),
-																		)
-																	}}>
-																	here
-																</a>
-																, or alternatively, you can use the Gemini Flash Model that will
-																give you better limits.
-															</p>
-														</div>
-													)
-												} else {
-													// Generic rate limit error for other providers
-													return (
-														<p
-															style={{
-																...pStyle,
-																color: "var(--vscode-errorForeground)",
-															}}>
-															{apiRequestFailedMessage || apiReqStreamingFailedMessage}
-														</p>
-													)
-												}
+												return (
+													<p
+														style={{
+															...pStyle,
+															color: "var(--vscode-errorForeground)",
+														}}>
+														{apiRequestFailedMessage || apiReqStreamingFailedMessage}
+													</p>
+												)
 											}
 
 											// Default error display
@@ -1423,7 +1353,7 @@ export const ChatRowContent = memo(
 									style={{
 										display: "flex",
 										flexDirection: "column",
-										backgroundColor: "rgba(255, 191, 0, 0.1)",
+										backgroundColor: "var(--vscode-textBlockQuote-background)",
 										padding: 8,
 										borderRadius: 3,
 										fontSize: 12,
@@ -1438,19 +1368,19 @@ export const ChatRowContent = memo(
 											className="codicon codicon-warning"
 											style={{
 												marginRight: 8,
-												fontSize: 18,
-												color: "#FFA500",
+												fontSize: 14,
+												color: "var(--vscode-descriptionForeground)",
 											}}></i>
 										<span
 											style={{
 												fontWeight: 500,
-												color: "#FFA500",
+												color: "var(--vscode-foreground)",
 											}}>
 											Shell Integration Unavailable
 										</span>
 									</div>
-									<div>
-										Cline won't be able to view the command's output. Please update VSCode (
+									<div style={{ color: "var(--vscode-foreground)", opacity: 0.8 }}>
+										Cline may have trouble viewing the command's output. Please update VSCode (
 										<code>CMD/CTRL + Shift + P</code> → "Update") and make sure you're using a supported
 										shell: zsh, bash, fish, or PowerShell (<code>CMD/CTRL + Shift + P</code> → "Terminal:
 										Select Default Profile").{" "}
@@ -1621,7 +1551,10 @@ export const ChatRowContent = memo(
 									<OptionsButtons
 										options={options}
 										selected={selected}
-										isActive={isLast && lastModifiedMessage?.ask === "followup"}
+										isActive={
+											(isLast && lastModifiedMessage?.ask === "followup") ||
+											(!selected && options && options.length > 0)
+										}
 										inputValue={inputValue}
 									/>
 									{quoteButtonState.visible && (
@@ -1710,7 +1643,10 @@ export const ChatRowContent = memo(
 								<OptionsButtons
 									options={options}
 									selected={selected}
-									isActive={isLast && lastModifiedMessage?.ask === "plan_mode_respond"}
+									isActive={
+										(isLast && lastModifiedMessage?.ask === "plan_mode_respond") ||
+										(!selected && options && options.length > 0)
+									}
 									inputValue={inputValue}
 								/>
 								{quoteButtonState.visible && (

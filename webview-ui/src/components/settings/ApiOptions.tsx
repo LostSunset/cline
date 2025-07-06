@@ -1,11 +1,8 @@
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { ModelsServiceClient } from "@/services/grpc-client"
-import { ApiConfiguration } from "@shared/api"
 import { StringRequest } from "@shared/proto/common"
-import { UpdateApiConfigurationRequest } from "@shared/proto/models"
-import { convertApiConfigurationToProto } from "@shared/proto-conversions/models/api-configuration-conversion"
 import { VSCodeDropdown, VSCodeOption } from "@vscode/webview-ui-toolkit/react"
-import { memo, useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useInterval } from "react-use"
 import styled from "styled-components"
 import { OPENROUTER_MODEL_PICKER_Z_INDEX } from "./OpenRouterModelPicker"
@@ -26,7 +23,6 @@ import { GeminiProvider } from "./providers/GeminiProvider"
 import { DoubaoProvider } from "./providers/DoubaoProvider"
 import { QwenProvider } from "./providers/QwenProvider"
 import { VertexProvider } from "./providers/VertexProvider"
-import GeminiCliProvider from "./providers/GeminiCliProvider"
 import { RequestyProvider } from "./providers/RequestyProvider"
 import { FireworksProvider } from "./providers/FireworksProvider"
 import { XaiProvider } from "./providers/XaiProvider"
@@ -39,13 +35,13 @@ import { NebiusProvider } from "./providers/NebiusProvider"
 import { LiteLlmProvider } from "./providers/LiteLlmProvider"
 import { VSCodeLmProvider } from "./providers/VSCodeLmProvider"
 import { LMStudioProvider } from "./providers/LMStudioProvider"
+import { useApiConfigurationHandlers } from "./utils/useApiConfigurationHandlers"
 
 interface ApiOptionsProps {
 	showModelOptions: boolean
 	apiErrorMessage?: string
 	modelIdErrorMessage?: string
 	isPopup?: boolean
-	saveImmediately?: boolean // Add prop to control immediate saving
 }
 
 // This is necessary to ensure dropdown opens downward, important for when this is used in popup
@@ -72,52 +68,15 @@ declare module "vscode" {
 	}
 }
 
-const ApiOptions = ({
-	showModelOptions,
-	apiErrorMessage,
-	modelIdErrorMessage,
-	isPopup,
-	saveImmediately = false, // Default to false
-}: ApiOptionsProps) => {
+const ApiOptions = ({ showModelOptions, apiErrorMessage, modelIdErrorMessage, isPopup }: ApiOptionsProps) => {
 	// Use full context state for immediate save payload
-	const extensionState = useExtensionState()
-	const { apiConfiguration, setApiConfiguration, uriScheme } = extensionState
+	const { apiConfiguration, uriScheme } = useExtensionState()
+
+	const selectedProvider = apiConfiguration?.apiProvider
+
+	const { handleFieldChange } = useApiConfigurationHandlers()
+
 	const [ollamaModels, setOllamaModels] = useState<string[]>([])
-	const [modelConfigurationSelected, setModelConfigurationSelected] = useState(false)
-
-	const handleInputChange = (field: keyof ApiConfiguration) => (event: any) => {
-		const newValue = event.target.value
-
-		// Update local state
-		setApiConfiguration({
-			...apiConfiguration,
-			[field]: newValue,
-		})
-
-		// If the field is the provider AND saveImmediately is true, save it immediately using the full context state
-		if (saveImmediately && field === "apiProvider") {
-			// Use apiConfiguration from the full extensionState context to send the most complete data
-			const currentFullApiConfig = extensionState.apiConfiguration
-
-			// Convert to proto format and send via gRPC
-			const updatedConfig = {
-				...currentFullApiConfig,
-				apiProvider: newValue,
-			}
-			const protoConfig = convertApiConfigurationToProto(updatedConfig)
-			ModelsServiceClient.updateApiConfigurationProto(
-				UpdateApiConfigurationRequest.create({
-					apiConfiguration: protoConfig,
-				}),
-			).catch((error) => {
-				console.error("Failed to update API configuration:", error)
-			})
-		}
-	}
-
-	const { selectedProvider, selectedModelId, selectedModelInfo } = useMemo(() => {
-		return normalizeApiConfiguration(apiConfiguration)
-	}, [apiConfiguration])
 
 	// Poll ollama/vscode-lm models
 	const requestLocalModels = useCallback(async () => {
@@ -162,7 +121,7 @@ const ApiOptions = ({
 				<VSCodeDropdown
 					id="api-provider"
 					value={selectedProvider}
-					onChange={handleInputChange("apiProvider")}
+					onChange={(e: any) => handleFieldChange("apiProvider", e.target.value)}
 					style={{
 						minWidth: 130,
 						position: "relative",
@@ -175,7 +134,6 @@ const ApiOptions = ({
 					<VSCodeOption value="openai">OpenAI Compatible</VSCodeOption>
 					<VSCodeOption value="vertex">GCP Vertex AI</VSCodeOption>
 					<VSCodeOption value="gemini">Google Gemini</VSCodeOption>
-					<VSCodeOption value="gemini-cli">Gemini CLI Provider</VSCodeOption>
 					<VSCodeOption value="deepseek">DeepSeek</VSCodeOption>
 					<VSCodeOption value="mistral">Mistral</VSCodeOption>
 					<VSCodeOption value="openai-native">OpenAI</VSCodeOption>
@@ -198,250 +156,105 @@ const ApiOptions = ({
 			</DropdownContainer>
 
 			{apiConfiguration && selectedProvider === "cline" && (
-				<ClineProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<ClineProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "asksage" && (
-				<AskSageProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<AskSageProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "anthropic" && (
-				<AnthropicProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<AnthropicProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "claude-code" && (
-				<ClaudeCodeProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<ClaudeCodeProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "openai-native" && (
-				<OpenAINativeProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<OpenAINativeProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "qwen" && (
-				<QwenProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<QwenProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "doubao" && (
-				<DoubaoProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<DoubaoProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "mistral" && (
-				<MistralProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<MistralProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "openrouter" && (
-				<OpenRouterProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					uriScheme={uriScheme}
-				/>
+				<OpenRouterProvider showModelOptions={showModelOptions} isPopup={isPopup} uriScheme={uriScheme} />
 			)}
 
 			{apiConfiguration && selectedProvider === "deepseek" && (
-				<DeepSeekProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<DeepSeekProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "together" && (
-				<TogetherProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<TogetherProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "openai" && (
-				<OpenAICompatibleProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<OpenAICompatibleProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "sambanova" && (
-				<SambanovaProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<SambanovaProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "bedrock" && (
-				<BedrockProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<BedrockProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "vertex" && (
-				<VertexProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<VertexProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "gemini" && (
-				<GeminiProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
-			)}
-
-			{apiConfiguration && selectedProvider === "gemini-cli" && (
-				<GeminiCliProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<GeminiProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "requesty" && (
-				<RequestyProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<RequestyProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "fireworks" && (
-				<FireworksProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<FireworksProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
-			{apiConfiguration && selectedProvider === "vscode-lm" && (
-				<VSCodeLmProvider apiConfiguration={apiConfiguration} handleInputChange={handleInputChange} />
-			)}
+			{apiConfiguration && selectedProvider === "vscode-lm" && <VSCodeLmProvider />}
 
 			{apiConfiguration && selectedProvider === "litellm" && (
-				<LiteLlmProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<LiteLlmProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "lmstudio" && (
-				<LMStudioProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<LMStudioProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "ollama" && (
-				<OllamaProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<OllamaProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "nebius" && (
-				<NebiusProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<NebiusProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "xai" && (
-				<XaiProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-					setApiConfiguration={setApiConfiguration}
-				/>
+				<XaiProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "cerebras" && (
-				<CerebrasProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<CerebrasProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiConfiguration && selectedProvider === "sapaicore" && (
-				<SapAiCoreProvider
-					apiConfiguration={apiConfiguration}
-					handleInputChange={handleInputChange}
-					showModelOptions={showModelOptions}
-					isPopup={isPopup}
-				/>
+				<SapAiCoreProvider showModelOptions={showModelOptions} isPopup={isPopup} />
 			)}
 
 			{apiErrorMessage && (
@@ -468,4 +281,4 @@ const ApiOptions = ({
 	)
 }
 
-export default memo(ApiOptions)
+export default ApiOptions
