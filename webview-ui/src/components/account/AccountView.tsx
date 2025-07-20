@@ -1,10 +1,15 @@
-import { VSCodeButton, VSCodeDivider, VSCodeLink, VSCodeDropdown, VSCodeOption } from "@vscode/webview-ui-toolkit/react"
-import { memo, useCallback, useEffect, useState } from "react"
-import { BadgeCent } from "lucide-react"
+import {
+	VSCodeButton,
+	VSCodeDivider,
+	VSCodeLink,
+	VSCodeDropdown,
+	VSCodeOption,
+	VSCodeTag,
+} from "@vscode/webview-ui-toolkit/react"
+import { memo, useCallback, useEffect, useState, useRef } from "react"
 import { useClineAuth } from "@/context/ClineAuthContext"
 import VSCodeButtonLink from "../common/VSCodeButtonLink"
 import ClineLogoWhite from "../../assets/ClineLogoWhite"
-import CountUp from "react-countup"
 import CreditsHistoryTable from "./CreditsHistoryTable"
 import { UsageTransaction, PaymentTransaction } from "@shared/ClineAccount"
 import { useExtensionState } from "@/context/ExtensionStateContext"
@@ -12,6 +17,65 @@ import { AccountServiceClient } from "@/services/grpc-client"
 import { EmptyRequest } from "@shared/proto/common"
 import { UserOrganization, UserOrganizationUpdateRequest } from "@shared/proto/account"
 import { formatCreditsBalance } from "@/utils/format"
+import { clineEnvConfig } from "@/config"
+
+// Custom hook for animated credit display with styled decimals
+const useAnimatedCredits = (targetValue: number, duration: number = 660) => {
+	const [currentValue, setCurrentValue] = useState(0)
+	const animationRef = useRef<number>()
+	const startTimeRef = useRef<number>()
+
+	useEffect(() => {
+		const animate = (timestamp: number) => {
+			if (!startTimeRef.current) {
+				startTimeRef.current = timestamp
+			}
+
+			const elapsed = timestamp - startTimeRef.current
+			const progress = Math.min(elapsed / duration, 1)
+
+			// Easing function (ease-out)
+			const easedProgress = 1 - Math.pow(1 - progress, 3)
+			const newValue = easedProgress * targetValue
+
+			setCurrentValue(newValue)
+
+			if (progress < 1) {
+				animationRef.current = requestAnimationFrame(animate)
+			}
+		}
+
+		// Reset and start animation
+		startTimeRef.current = undefined
+		animationRef.current = requestAnimationFrame(animate)
+
+		return () => {
+			if (animationRef.current) {
+				cancelAnimationFrame(animationRef.current)
+			}
+		}
+	}, [targetValue, duration])
+
+	return currentValue
+}
+
+// Custom component to handle styled credit display
+const StyledCreditDisplay = ({ balance }: { balance: number }) => {
+	const animatedValue = useAnimatedCredits(formatCreditsBalance(balance))
+	const formatted = animatedValue.toFixed(4)
+	const parts = formatted.split(".")
+	const wholePart = parts[0]
+	const decimalPart = parts[1] || "0000"
+	const firstTwoDecimals = decimalPart.slice(0, 2)
+	const lastTwoDecimals = decimalPart.slice(2)
+
+	return (
+		<span className="font-azeret-mono font-light tabular-nums">
+			{wholePart}.{firstTwoDecimals}
+			<span className="text-[var(--vscode-descriptionForeground)]">{lastTwoDecimals}</span>
+		</span>
+	)
+}
 
 type VSCodeDropdownChangeEvent = Event & {
 	target: {
@@ -39,6 +103,15 @@ const AccountView = ({ onDone }: AccountViewProps) => {
 	)
 }
 
+const getMainRole = (roles?: string[]) => {
+	if (!roles) return undefined
+
+	if (roles.includes("owner")) return "Owner"
+	if (roles.includes("admin")) return "Admin"
+
+	return "Member"
+}
+
 export const ClineAccountView = () => {
 	const { clineUser, handleSignIn, handleSignOut } = useClineAuth()
 	const { userInfo, apiConfiguration } = useExtensionState()
@@ -52,10 +125,11 @@ export const ClineAccountView = () => {
 	const [isSwitchingOrg, setIsSwitchingOrg] = useState(false)
 	const [usageData, setUsageData] = useState<UsageTransaction[]>([])
 	const [paymentsData, setPaymentsData] = useState<PaymentTransaction[]>([])
+	const intervalRef = useRef<NodeJS.Timeout | null>(null)
 
 	const dashboardAddCreditsURL = activeOrganization
-		? "https://app.cline.bot/dashboard/organization?tab=credits&redirect=true"
-		: "https://app.cline.bot/dashboard/account?tab=credits&redirect=true"
+		? `${clineEnvConfig.appBaseUrl}/dashboard/organization?tab=credits&redirect=true`
+		: `${clineEnvConfig.appBaseUrl}/dashboard/account?tab=credits&redirect=true`
 
 	async function getUserCredits() {
 		setIsLoading(true)
@@ -108,6 +182,30 @@ export const ClineAccountView = () => {
 
 		fetchUserData()
 	}, [user])
+
+	// Periodic refresh while component is mounted
+	useEffect(() => {
+		if (!user) return
+
+		intervalRef.current = setInterval(() => {
+			getUserCredits().catch((err) => console.error("Auto-refresh failed:", err))
+		}, 10_000)
+
+		return () => {
+			if (intervalRef.current) clearInterval(intervalRef.current)
+		}
+	}, [user])
+
+	const handleManualRefresh = async () => {
+		await getUserCredits()
+
+		if (intervalRef.current) {
+			clearInterval(intervalRef.current)
+			intervalRef.current = setInterval(() => {
+				getUserCredits().catch((err) => console.error("Auto-refresh failed:", err))
+			}, 10_000)
+		}
+	}
 
 	const handleLogin = () => {
 		handleSignIn()
@@ -165,28 +263,38 @@ export const ClineAccountView = () => {
 									<div className="text-sm text-[var(--vscode-descriptionForeground)]">{user.email}</div>
 								)}
 
-								{userOrganizations && (
-									<VSCodeDropdown
-										key={activeOrganization?.organizationId || "personal"}
-										currentValue={activeOrganization?.organizationId || ""}
-										onChange={handleOrganizationChange}
-										disabled={isSwitchingOrg || isLoading}
-										style={{ width: "100%", marginTop: "4px" }}>
-										<VSCodeOption value="">Personal</VSCodeOption>
-										{userOrganizations.map((org: UserOrganization) => (
-											<VSCodeOption key={org.organizationId} value={org.organizationId}>
-												{org.name}
-											</VSCodeOption>
-										))}
-									</VSCodeDropdown>
-								)}
+								<div className="flex gap-2 items-center mt-1">
+									{userOrganizations && (
+										<VSCodeDropdown
+											key={activeOrganization?.organizationId || "personal"}
+											currentValue={activeOrganization?.organizationId || ""}
+											onChange={handleOrganizationChange}
+											disabled={isSwitchingOrg || isLoading}
+											className="w-full">
+											<VSCodeOption value="">Personal</VSCodeOption>
+											{userOrganizations.map((org: UserOrganization) => (
+												<VSCodeOption key={org.organizationId} value={org.organizationId}>
+													{org.name}
+												</VSCodeOption>
+											))}
+										</VSCodeDropdown>
+									)}
+									{activeOrganization?.roles && (
+										<VSCodeTag className="text-xs p-2" title="Role">
+											{getMainRole(activeOrganization.roles)}
+										</VSCodeTag>
+									)}
+								</div>
 							</div>
 						</div>
 					</div>
 
 					<div className="w-full flex gap-2 flex-col min-[225px]:flex-row">
 						<div className="w-full min-[225px]:w-1/2">
-							<VSCodeButtonLink href="https://app.cline.bot/dashboard" appearance="primary" className="w-full">
+							<VSCodeButtonLink
+								href={`${clineEnvConfig.appBaseUrl}/dashboard`}
+								appearance="primary"
+								className="w-full">
 								Dashboard
 							</VSCodeButtonLink>
 						</div>
@@ -200,7 +308,9 @@ export const ClineAccountView = () => {
 
 					{activeOrganization === null && (
 						<div className="w-full flex flex-col items-center">
-							<div className="text-sm text-[var(--vscode-descriptionForeground)] mb-3">CURRENT BALANCE</div>
+							<div className="text-sm text-[var(--vscode-descriptionForeground)] mb-3 font-azeret-mono font-light">
+								CURRENT BALANCE
+							</div>
 
 							<div className="text-4xl font-bold text-[var(--vscode-foreground)] mb-6 flex items-center gap-2">
 								{isLoading ? (
@@ -211,11 +321,10 @@ export const ClineAccountView = () => {
 											<span>----</span>
 										) : (
 											<>
-												<BadgeCent className="size-6 text-[var(--vscode-foreground)]" />
-												<CountUp end={formatCreditsBalance(balance)} duration={0.66} decimals={4} />
+												<StyledCreditDisplay balance={balance} />
 											</>
 										)}
-										<VSCodeButton appearance="icon" className="mt-1" onClick={getUserCredits}>
+										<VSCodeButton appearance="icon" className="mt-1" onClick={handleManualRefresh}>
 											<span className="codicon codicon-refresh"></span>
 										</VSCodeButton>
 									</>
