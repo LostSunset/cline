@@ -19,7 +19,6 @@ import { ApiConfiguration } from "@shared/api"
 import { findLast, findLastIndex } from "@shared/array"
 import { AutoApprovalSettings } from "@shared/AutoApprovalSettings"
 import { BrowserSettings } from "@shared/BrowserSettings"
-import { ChatSettings } from "@shared/ChatSettings"
 import { combineApiRequests } from "@shared/combineApiRequests"
 import { combineCommandSequences } from "@shared/combineCommandSequences"
 import { ClineApiReqCancelReason, ClineApiReqInfo, ClineAsk, ClineMessage, ClineSay } from "@shared/ExtensionMessage"
@@ -78,7 +77,7 @@ import { processFilesIntoText } from "@integrations/misc/extract-text"
 import WorkspaceTracker from "@integrations/workspace/WorkspaceTracker"
 import { McpHub } from "@services/mcp/McpHub"
 import { convertClineMessageToProto } from "@shared/proto-conversions/cline-message"
-import { isClaude4ModelFamily, isGemini2dot5ModelFamily } from "@utils/model-utils"
+import { isClaude4ModelFamily, isGemini2dot5ModelFamily, isGrok4ModelFamily } from "@utils/model-utils"
 import { isInTestMode } from "../../services/test/TestMode"
 import { ensureLocalClineDirExists } from "../context/instructions/user-instructions/rule-helpers"
 import { refreshWorkflowToggles } from "../context/instructions/user-instructions/workflows"
@@ -86,6 +85,8 @@ import { MessageStateHandler } from "./message-state"
 import { TaskState } from "./TaskState"
 import { ToolExecutor } from "./ToolExecutor"
 import { updateApiReqMsg } from "./utils"
+import { CacheService } from "../storage/CacheService"
+import { Mode, OpenaiReasoningEffort } from "@shared/storage/types"
 import { ShowMessageType } from "@/shared/proto/index.host"
 
 export const USE_EXPERIMENTAL_CLAUDE4_FEATURES = false
@@ -130,10 +131,15 @@ export class Task {
 	private reinitExistingTaskFromId: (taskId: string) => Promise<void>
 	private cancelTask: () => Promise<void>
 
+	// Cache service
+	private cacheService: CacheService
+
 	// User chat state
 	autoApprovalSettings: AutoApprovalSettings
 	browserSettings: BrowserSettings
-	chatSettings: ChatSettings
+	preferredLanguage: string
+	openaiReasoningEffort: OpenaiReasoningEffort
+	mode: Mode
 
 	// Message and conversation state
 	messageStateHandler: MessageStateHandler
@@ -148,13 +154,16 @@ export class Task {
 		apiConfiguration: ApiConfiguration,
 		autoApprovalSettings: AutoApprovalSettings,
 		browserSettings: BrowserSettings,
-		chatSettings: ChatSettings,
+		preferredLanguage: string,
+		openaiReasoningEffort: OpenaiReasoningEffort,
+		mode: Mode,
 		shellIntegrationTimeout: number,
 		terminalReuseEnabled: boolean,
 		terminalOutputLineLimit: number,
 		defaultTerminalProfile: string,
 		enableCheckpointsSetting: boolean,
 		cwd: string,
+		cacheService: CacheService,
 		task?: string,
 		images?: string[],
 		files?: string[],
@@ -193,9 +202,12 @@ export class Task {
 		this.diffViewProvider = HostProvider.get().createDiffViewProvider()
 		this.autoApprovalSettings = autoApprovalSettings
 		this.browserSettings = browserSettings
-		this.chatSettings = chatSettings
+		this.preferredLanguage = preferredLanguage
+		this.openaiReasoningEffort = openaiReasoningEffort
+		this.mode = mode
 		this.enableCheckpoints = enableCheckpointsSetting
 		this.cwd = cwd
+		this.cacheService = cacheService
 
 		// Set up MCP notification callback for real-time notifications
 		this.mcpHub.setNotificationCallback(async (serverName: string, level: string, message: string) => {
@@ -267,19 +279,18 @@ export class Task {
 			},
 		}
 
-		const currentProvider =
-			chatSettings.mode === "plan" ? apiConfiguration.planModeApiProvider : apiConfiguration.actModeApiProvider
+		const currentProvider = this.mode === "plan" ? apiConfiguration.planModeApiProvider : apiConfiguration.actModeApiProvider
 
 		if (currentProvider === "openai" || currentProvider === "openai-native") {
-			if (chatSettings.mode === "plan") {
-				effectiveApiConfiguration.planModeReasoningEffort = chatSettings.openAIReasoningEffort
+			if (this.mode === "plan") {
+				effectiveApiConfiguration.planModeReasoningEffort = this.openaiReasoningEffort
 			} else {
-				effectiveApiConfiguration.actModeReasoningEffort = chatSettings.openAIReasoningEffort
+				effectiveApiConfiguration.actModeReasoningEffort = this.openaiReasoningEffort
 			}
 		}
 
 		// Now that taskId is initialized, we can build the API handler
-		this.api = buildApiHandler(effectiveApiConfiguration, chatSettings.mode)
+		this.api = buildApiHandler(effectiveApiConfiguration, this.mode)
 
 		// Set taskId on browserSession for telemetry tracking
 		this.browserSession.setTaskId(this.taskId)
@@ -313,11 +324,12 @@ export class Task {
 			this.clineIgnoreController,
 			this.workspaceTracker,
 			this.contextManager,
+			this.cacheService,
 			this.autoApprovalSettings,
 			this.browserSettings,
 			cwd,
 			this.taskId,
-			this.chatSettings,
+			this.mode,
 			this.say.bind(this),
 			this.ask.bind(this),
 			this.saveCheckpoint.bind(this),
@@ -1178,7 +1190,7 @@ export class Task {
 		const hasPendingFileContextWarnings = pendingContextWarning && pendingContextWarning.length > 0
 
 		const [taskResumptionMessage, userResponseMessage] = formatResponse.taskResumption(
-			this.chatSettings?.mode === "plan" ? "plan" : "act",
+			this.mode === "plan" ? "plan" : "act",
 			agoText,
 			this.cwd,
 			wasRecent,
@@ -1654,22 +1666,10 @@ export class Task {
 		}
 	}
 
-	private async migratePreferredLanguageToolSetting(): Promise<void> {
-		const config = vscode.workspace.getConfiguration("cline")
-		const preferredLanguage = config.get<LanguageDisplay>("preferredLanguage")
-		if (preferredLanguage !== undefined) {
-			this.chatSettings.preferredLanguage = preferredLanguage
-			// Remove from VSCode configuration
-			await config.update("preferredLanguage", undefined, true)
-		}
-	}
-
 	private async getCurrentProviderInfo(): Promise<{ modelId: string; providerId: string }> {
 		const modelId = this.api.getModel()?.id
-		const providerId =
-			this.chatSettings.mode === "plan"
-				? ((await getGlobalState(this.getContext(), "planModeApiProvider")) as string)
-				: ((await getGlobalState(this.getContext(), "actModeApiProvider")) as string)
+		const apiConfig = this.cacheService.getApiConfiguration()
+		const providerId = (this.mode === "plan" ? apiConfig.planModeApiProvider : apiConfig.actModeApiProvider) as string
 		return { modelId, providerId }
 	}
 
@@ -1687,11 +1687,11 @@ export class Task {
 
 		const supportsBrowserUse = modelSupportsBrowserUse && !disableBrowserTool // only enable browser use if the model supports it and the user hasn't disabled it
 
-		const isNextGenModel = isClaude4ModelFamily(this.api) || isGemini2dot5ModelFamily(this.api)
+		const isNextGenModel =
+			isClaude4ModelFamily(this.api) || isGemini2dot5ModelFamily(this.api) || isGrok4ModelFamily(this.api)
 		let systemPrompt = await SYSTEM_PROMPT(this.cwd, supportsBrowserUse, this.mcpHub, this.browserSettings, isNextGenModel)
 
-		await this.migratePreferredLanguageToolSetting()
-		const preferredLanguage = getLanguageKey(this.chatSettings.preferredLanguage as LanguageDisplay)
+		const preferredLanguage = getLanguageKey(this.preferredLanguage as LanguageDisplay)
 		const preferredLanguageInstructions =
 			preferredLanguage && preferredLanguage !== DEFAULT_LANGUAGE_SETTINGS
 				? `# Preferred Language\n\nSpeak in ${preferredLanguage}.`
@@ -2000,7 +2000,7 @@ export class Task {
 		const { modelId, providerId } = await this.getCurrentProviderInfo()
 		if (providerId && modelId) {
 			try {
-				await this.modelContextTracker.recordModelUsage(providerId, modelId, this.chatSettings.mode)
+				await this.modelContextTracker.recordModelUsage(providerId, modelId, this.mode)
 			} catch {}
 		}
 
@@ -2771,7 +2771,7 @@ export class Task {
 		details += `\n${lastApiReqTotalTokens.toLocaleString()} / ${(contextWindow / 1000).toLocaleString()}K tokens used (${usagePercentage}%)`
 
 		details += "\n\n# Current Mode"
-		if (this.chatSettings.mode === "plan") {
+		if (this.mode === "plan") {
 			details += "\nPLAN MODE\n" + formatResponse.planModeInstructions()
 		} else {
 			details += "\nACT MODE"

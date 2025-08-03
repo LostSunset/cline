@@ -47,6 +47,9 @@ const disallowedApis = {
 	// "vscode.window.showInformationMessage": {
 	// 	messageId: "useHostBridgeShowMessage",
 	// },
+	"vscode.workspace.findFiles": {
+		messageId: "useNative",
+	},
 }
 
 module.exports = createRule({
@@ -85,6 +88,10 @@ module.exports = createRule({
 				"Found: {{code}}",
 			useUtils:
 				"Use utilities in @/utils instead of calling vscode APIs directly.\n" +
+				"This provides a consistent abstraction across VSCode and standalone environments.\n" +
+				"Found: {{code}}",
+			useNative:
+				"Use a native Javascript API instead of calling the vscode API.\n" +
 				"This provides a consistent abstraction across VSCode and standalone environments.\n" +
 				"Found: {{code}}",
 		},
@@ -185,10 +192,6 @@ module.exports = createRule({
 				return true
 			}
 			if (filename.includes("/standalone/runtime-files/")) {
-				return true
-			}
-			// Skip unit tests
-			if (filename.endsWith(".test.ts")) {
 				return true
 			}
 		}
